@@ -48,7 +48,6 @@ local function get_hl_groups()
     GitNew = { fg = colors.yellow },
 
     WindowPicker = { gui = "bold", fg = "#ededed", bg = "#4493c8" },
-    MarkedFile   = { gui = "bold", fg = "#6be37a" },
   }
 end
 
@@ -74,6 +73,7 @@ local function get_links()
     StatusLine = "StatusLine",
     StatusLineNC = "StatusLineNC",
     SignColumn = 'NvimTreeNormal',
+    MarkedFile = "Visual"
   }
 end
 
