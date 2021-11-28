@@ -42,7 +42,7 @@ local function iterate_toggle_off(node)
   end
 end
 
-function M.toggle_all_off()
+function M.disable_all()
   iterate_toggle_off(lib.Tree)
   if view.win_open() then
     renderer.draw(lib.Tree, true)

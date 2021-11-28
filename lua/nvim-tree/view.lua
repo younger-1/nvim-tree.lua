@@ -77,7 +77,7 @@ M.View = {
     { key = "q",                            cb = M.nvim_tree_callback("close") },
     { key = "g?",                           cb = M.nvim_tree_callback("toggle_help") },
     { key = 'm',                            cb = ":lua require'nvim-tree.marks'.toggle_mark()<cr>" },
-    { key = 'M',                            cb = ":lua require'nvim-tree.marks'.toggle_all_off()<cr>" },
+    { key = 'M',                            cb = ":lua require'nvim-tree.marks'.disable_all()<cr>" },
   }
 }
 
