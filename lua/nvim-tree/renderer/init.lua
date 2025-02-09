@@ -1,281 +1,123 @@
-local utils = require "nvim-tree.utils"
-local view = require "nvim-tree.view"
-local _padding = require "nvim-tree.renderer.padding"
-local _help = require "nvim-tree.renderer.help"
-local _icons = require "nvim-tree.renderer.icons"
-local git = require "nvim-tree.renderer.git"
-local core = require "nvim-tree.core"
+local log = require("nvim-tree.log")
+local view = require("nvim-tree.view")
+local events = require("nvim-tree.events")
 
-local api = vim.api
+local Class = require("nvim-tree.classic")
+local Builder = require("nvim-tree.renderer.builder")
 
-local lines = {}
-local hl = {}
-local index = 0
-local namespace_id = api.nvim_create_namespace "NvimTreeHighlights"
+local SIGN_GROUP = "NvimTreeRendererSigns"
 
-local icon_state = _icons.get_config()
+local namespace_highlights_id = vim.api.nvim_create_namespace("NvimTreeHighlights")
+local namespace_extmarks_id = vim.api.nvim_create_namespace("NvimTreeExtmarks")
+local namespace_virtual_lines_id = vim.api.nvim_create_namespace("NvimTreeVirtualLines")
 
-local should_hl_opened_files = (vim.g.nvim_tree_highlight_opened_files or 0) ~= 0
+---@alias HighlightRangeArgs { higroup:string, start:integer[], finish:integer[] } named arguments for vim.hl.range
 
-local get_folder_icon = function()
-  return ""
-end
-local function get_trailing_length()
-  return vim.g.nvim_tree_add_trailing and 1 or 0
-end
+---@class (exact) Renderer: Class
+---@field explorer Explorer
+local Renderer = Class:extend()
 
-local set_folder_hl = function(line, depth, git_icon_len, _, hl_group)
-  table.insert(hl, { hl_group, line, depth + git_icon_len, -1 })
-end
+---@class Renderer
+---@overload fun(args: RendererArgs): Renderer
 
-local icon_padding = vim.g.nvim_tree_icon_padding or " "
+---@class (exact) RendererArgs
+---@field explorer Explorer
 
-if icon_state.show_folder_icon then
-  get_folder_icon = function(open, is_symlink, has_children)
-    local n
-    if is_symlink and open then
-      n = icon_state.icons.folder_icons.symlink_open
-    elseif is_symlink then
-      n = icon_state.icons.folder_icons.symlink
-    elseif open then
-      if has_children then
-        n = icon_state.icons.folder_icons.open
-      else
-        n = icon_state.icons.folder_icons.empty_open
-      end
-    else
-      if has_children then
-        n = icon_state.icons.folder_icons.default
-      else
-        n = icon_state.icons.folder_icons.empty
-      end
-    end
-    return n .. icon_padding
-  end
-  set_folder_hl = function(line, depth, icon_len, name_len, hl_group)
-    table.insert(hl, { hl_group, line, depth + icon_len, depth + icon_len + name_len + get_trailing_length() })
-    local hl_icon = (vim.g.nvim_tree_highlight_opened_files or 0) ~= 0 and hl_group or "NvimTreeFolderIcon"
-    table.insert(hl, { hl_icon, line, depth, depth + icon_len })
-  end
+---@protected
+---@param args RendererArgs
+function Renderer:new(args)
+  self.explorer = args.explorer
 end
 
-local get_file_icon = function()
-  return ""
-end
-if icon_state.show_file_icon then
-  if icon_state.has_devicons then
-    local web_devicons = require "nvim-web-devicons"
-
-    get_file_icon = function(fname, extension, line, depth)
-      local icon, hl_group = web_devicons.get_icon(fname, extension)
-
-      if icon and hl_group ~= "DevIconDefault" then
-        if hl_group then
-          table.insert(hl, { hl_group, line, depth, depth + #icon + 1 })
-        end
-        return icon .. icon_padding
-      elseif string.match(extension, "%.(.*)") then
-        -- If there are more extensions to the file, try to grab the icon for them recursively
-        return get_file_icon(fname, string.match(extension, "%.(.*)"), line, depth)
-      else
-        return #icon_state.icons.default > 0 and icon_state.icons.default .. icon_padding or ""
-      end
-    end
+---@private
+---@param bufnr number
+---@param lines string[]
+---@param hl_range_args HighlightRangeArgs[]
+---@param signs string[]
+---@param extmarks table[] extra marks for right icon placement
+---@param virtual_lines table[] virtual lines for hidden count display
+function Renderer:_draw(bufnr, lines, hl_range_args, signs, extmarks, virtual_lines)
+  if vim.fn.has("nvim-0.10") == 1 then
+    vim.api.nvim_set_option_value("modifiable", true, { buf = bufnr })
   else
-    get_file_icon = function()
-      return #icon_state.icons.default > 0 and icon_state.icons.default .. icon_padding or ""
+    vim.api.nvim_buf_set_option(bufnr, "modifiable", true) ---@diagnostic disable-line: deprecated
+  end
+
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  self:render_hl(bufnr, hl_range_args)
+
+  if vim.fn.has("nvim-0.10") == 1 then
+    vim.api.nvim_set_option_value("modifiable", false, { buf = bufnr })
+  else
+    vim.api.nvim_buf_set_option(bufnr, "modifiable", false) ---@diagnostic disable-line: deprecated
+  end
+
+  vim.fn.sign_unplace(SIGN_GROUP)
+  for i, sign_name in pairs(signs) do
+    vim.fn.sign_place(0, SIGN_GROUP, sign_name, bufnr, { lnum = i + 1 })
+  end
+
+  vim.api.nvim_buf_clear_namespace(bufnr, namespace_extmarks_id, 0, -1)
+  for i, extname in pairs(extmarks) do
+    for _, mark in ipairs(extname) do
+      vim.api.nvim_buf_set_extmark(bufnr, namespace_extmarks_id, i, -1, {
+        virt_text     = { { mark.str, mark.hl } },
+        virt_text_pos = "right_align",
+        hl_mode       = "combine",
+      })
     end
   end
-end
 
-local get_symlink_icon = function()
-  return icon_state.icons.symlink
-end
-if icon_state.show_file_icon then
-  get_symlink_icon = function()
-    return #icon_state.icons.symlink > 0 and icon_state.icons.symlink .. icon_padding or ""
+  vim.api.nvim_buf_clear_namespace(bufnr, namespace_virtual_lines_id, 0, -1)
+  for line_nr, vlines in pairs(virtual_lines) do
+    vim.api.nvim_buf_set_extmark(bufnr, namespace_virtual_lines_id, line_nr, 0, {
+      virt_lines         = vlines,
+      virt_lines_above   = false,
+      virt_lines_leftcol = true,
+    })
   end
 end
 
-local get_special_icon = function()
-  return ""
-end
-if icon_state.show_file_icon then
-  get_special_icon = function()
-    return #icon_state.icons.default > 0 and icon_state.icons.default .. icon_padding or ""
+---@private
+---@param bufnr integer
+---@param hl_range_args HighlightRangeArgs[]
+function Renderer:render_hl(bufnr, hl_range_args)
+  if not bufnr or not vim.api.nvim_buf_is_loaded(bufnr) then
+    return
   end
-end
-
-local picture = {
-  jpg = true,
-  jpeg = true,
-  png = true,
-  gif = true,
-}
-
-local function get_special_files_map()
-  return vim.g.nvim_tree_special_files
-    or {
-      ["Cargo.toml"] = true,
-      Makefile = true,
-      ["README.md"] = true,
-      ["readme.md"] = true,
-    }
-end
-
-local function update_draw_data(tree, depth, markers)
-  local special = get_special_files_map()
-
-  for idx, node in ipairs(tree.nodes) do
-    local padding = _padding.get_padding(depth, idx, tree, node, markers)
-    local offset = string.len(padding)
-    if depth > 0 then
-      table.insert(hl, { "NvimTreeIndentMarker", index, 0, offset })
-    end
-
-    local git_hl = git.get_highlight(node)
-
-    if node.nodes then
-      local has_children = #node.nodes ~= 0 or node.has_children
-      local icon = get_folder_icon(node.open, node.link_to ~= nil, has_children)
-      local git_icon = git.get_icons(node, index, offset, #icon, hl) or ""
-      -- INFO: this is mandatory in order to keep gui attributes (bold/italics)
-      local folder_hl = "NvimTreeFolderName"
-      local name = node.name
-      local next = node.group_next
-      while next do
-        name = name .. "/" .. next.name
-        next = next.group_next
-      end
-      if not has_children then
-        folder_hl = "NvimTreeEmptyFolderName"
-      end
-      if node.open then
-        folder_hl = "NvimTreeOpenedFolderName"
-      end
-      if special[node.absolute_path] then
-        folder_hl = "NvimTreeSpecialFolderName"
-      end
-      set_folder_hl(index, offset, #icon + #git_icon, #name, folder_hl)
-      if git_hl then
-        set_folder_hl(index, offset, #icon + #git_icon, #name, git_hl)
-      end
-      index = index + 1
-      if node.open then
-        table.insert(lines, padding .. icon .. git_icon .. name .. (vim.g.nvim_tree_add_trailing == 1 and "/" or ""))
-        update_draw_data(node, depth + 2, markers)
-      else
-        table.insert(lines, padding .. icon .. git_icon .. name .. (vim.g.nvim_tree_add_trailing == 1 and "/" or ""))
-      end
-    elseif node.link_to then
-      local icon = get_symlink_icon()
-      local link_hl = git_hl or "NvimTreeSymlink"
-      local arrow = vim.g.nvim_tree_symlink_arrow or " ➛ "
-      table.insert(hl, { link_hl, index, offset, -1 })
-      table.insert(lines, padding .. icon .. node.name .. arrow .. node.link_to)
-      index = index + 1
+  vim.api.nvim_buf_clear_namespace(bufnr, namespace_highlights_id, 0, -1)
+  for _, args in ipairs(hl_range_args) do
+    if vim.fn.has("nvim-0.11") == 1 and vim.hl and vim.hl.range then
+      vim.hl.range(bufnr, namespace_highlights_id, args.higroup, args.start, args.finish, {})
     else
-      local icon
-      local git_icons
-      if special[node.absolute_path] or special[node.name] then
-        icon = get_special_icon()
-        git_icons = git.get_icons(node, index, offset, 0, hl)
-        table.insert(hl, { "NvimTreeSpecialFile", index, offset + #git_icons, -1 })
-      else
-        icon = get_file_icon(node.name, node.extension, index, offset)
-        git_icons = git.get_icons(node, index, offset, #icon, hl)
-      end
-      table.insert(lines, padding .. icon .. git_icons .. node.name)
-
-      if node.executable then
-        table.insert(hl, { "NvimTreeExecFile", index, offset + #icon + #git_icons, -1 })
-      elseif picture[node.extension] then
-        table.insert(hl, { "NvimTreeImageFile", index, offset + #icon + #git_icons, -1 })
-      end
-
-      if should_hl_opened_files then
-        if vim.fn.bufloaded(node.absolute_path) > 0 then
-          if vim.g.nvim_tree_highlight_opened_files == 1 then
-            table.insert(hl, { "NvimTreeOpenedFile", index, offset, offset + #icon }) -- highlight icon only
-          elseif vim.g.nvim_tree_highlight_opened_files == 2 then
-            table.insert(hl, {
-              "NvimTreeOpenedFile",
-              index,
-              offset + #icon + #git_icons,
-              offset + #icon + #git_icons + #node.name,
-            }) -- highlight name only
-          elseif vim.g.nvim_tree_highlight_opened_files == 3 then
-            table.insert(hl, { "NvimTreeOpenedFile", index, offset, -1 }) -- highlight whole line
-          end
-        end
-      end
-
-      if git_hl then
-        table.insert(hl, { git_hl, index, offset + #icon + #git_icons, -1 })
-      end
-      index = index + 1
+      vim.api.nvim_buf_add_highlight(bufnr, namespace_highlights_id, args.higroup, args.start[1], args.start[2], args.finish[2]) ---@diagnostic disable-line: deprecated
     end
   end
 end
 
-local M = {}
-
-local function compute_header()
-  if view.is_root_folder_visible() then
-    local root_folder_modifier = vim.g.nvim_tree_root_folder_modifier or ":~"
-    local root_name = utils.path_join {
-      utils.path_remove_trailing(vim.fn.fnamemodify(core.get_cwd(), root_folder_modifier)),
-      "..",
-    }
-    table.insert(lines, root_name)
-    table.insert(hl, { "NvimTreeRootFolder", index, 0, string.len(root_name) })
-    index = 1
-  end
-end
-
-function M.draw()
+function Renderer:draw()
   local bufnr = view.get_bufnr()
-  if not core.get_explorer() or not bufnr or not api.nvim_buf_is_loaded(bufnr) then
+  if not bufnr or not vim.api.nvim_buf_is_loaded(bufnr) then
     return
   end
-  local cursor
-  if view.is_visible() then
-    cursor = api.nvim_win_get_cursor(view.get_winnr())
-  end
-  index = 0
-  lines = {}
-  hl = {}
 
-  icon_state = _icons.get_config()
-  local show_arrows = vim.g.nvim_tree_indent_markers ~= 1
-    and icon_state.show_folder_icon
-    and icon_state.show_folder_arrows
-  _padding.reload_padding_function()
-  git.reload()
-  compute_header()
-  update_draw_data(core.get_explorer(), show_arrows and 2 or 0, {})
+  local profile = log.profile_start("draw")
 
-  if view.is_help_ui() then
-    lines, hl = _help.compute_lines()
-  end
-  api.nvim_buf_set_option(bufnr, "modifiable", true)
-  api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-  M.render_hl(bufnr)
-  api.nvim_buf_set_option(bufnr, "modifiable", false)
+  local cursor = vim.api.nvim_win_get_cursor(view.get_winnr() or 0)
 
-  if cursor and #lines >= cursor[1] then
-    api.nvim_win_set_cursor(view.get_winnr(), cursor)
+  local builder = Builder(self.explorer):build()
+
+  self:_draw(bufnr, builder.lines, builder.hl_range_args, builder.signs, builder.extmarks, builder.virtual_lines)
+
+  if cursor and #builder.lines >= cursor[1] then
+    vim.api.nvim_win_set_cursor(view.get_winnr() or 0, cursor)
   end
+
+  view.grow_from_content()
+
+  log.profile_end(profile)
+
+  events._dispatch_on_tree_rendered(bufnr, view.get_winnr())
 end
 
-function M.render_hl(bufnr)
-  if not bufnr or not api.nvim_buf_is_loaded(bufnr) then
-    return
-  end
-  api.nvim_buf_clear_namespace(bufnr, namespace_id, 0, -1)
-  for _, data in ipairs(hl) do
-    api.nvim_buf_add_highlight(bufnr, namespace_id, data[1], data[2], data[3], data[4])
-  end
-end
-
-return M
+return Renderer
